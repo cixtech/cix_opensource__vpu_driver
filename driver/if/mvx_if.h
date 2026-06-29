@@ -501,6 +501,13 @@ struct mvx_client_ops {
      */
     void (*reset_priority)(struct mvx_client_session *session);
 
+    /**
+     * wait_probe_done() - Wait for device probe to complete.
+     *
+     * Return: 0 on success, else error code.
+     */
+    int (*wait_probe_done)(struct mvx_client_ops *client);
+
 };
 
 /****************************************************************************

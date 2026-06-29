@@ -51,6 +51,10 @@ int mvx_v4l2_open(struct file *file)
     struct v4l2_format fmt = { 0 };
     int ret;
 
+    ret = ctx->client_ops->wait_probe_done(ctx->client_ops);
+    if (ret != 0)
+        return -EBUSY;
+
     session = devm_kzalloc(ctx->dev, sizeof(*session), GFP_KERNEL);
     if (session == NULL) {
         MVX_LOG_PRINT(&mvx_log_if, MVX_LOG_WARNING,

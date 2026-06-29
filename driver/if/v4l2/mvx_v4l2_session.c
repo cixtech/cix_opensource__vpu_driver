@@ -83,8 +83,16 @@ static const unsigned int xfer_map[] = {
     V4L2_MVX_COLORIMETRY_UNSUPPORTED,   /*IEC 61966-2-4*/
     V4L2_XFER_FUNC_BT1361,              /*Rec. ITU-R BT.1361-0 extended colour gamut*/
     V4L2_XFER_FUNC_SRGB,                /*IEC 61966-2-1 sRGB or sYCC*/
+#ifdef V4L2_XFER_FUNC_BT2020_10
     V4L2_XFER_FUNC_BT2020_10,           /*Rec. ITU-R BT.2020-2 (10 bit system)*/
+#else
+    V4L2_XFER_FUNC_709,
+#endif
+#ifdef V4L2_XFER_FUNC_BT2020_12
     V4L2_XFER_FUNC_BT2020_12,           /*Rec. ITU-R BT.2020-2 (12 bit system)*/
+#else
+    V4L2_XFER_FUNC_709,
+#endif
     V4L2_XFER_FUNC_SMPTE2084,           /*SMPTE ST 2084*/
     V4L2_XFER_FUNC_ST428,               /*SMPTE ST 428-1*/
     V4L2_XFER_FUNC_HLG,                 /*STD-B67 and Rec. ITU-R BT.2100-2 hybrid log-gamma (HLG) system*/

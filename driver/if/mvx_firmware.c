@@ -599,14 +599,8 @@ int mvx_fw_construct(struct mvx_fw *fw,
     fw->session = session;
     fw->client_ops = client_ops;
     fw->csession = csession;
-    /**
-     * Other cores always read firmware instance0 text_data(virtual address
-     * 0x0000_0000 - 0x0000_00018) at the begining. Therefore, must do map for
-     * core0(firmware instance0) even thouth disallow it.
-     */
-    core_mask |= 1;
     fw->ncores = fls(core_mask); // used in fw_map(). fls() to make sure all the cores can be mapped
-    fw->core_mask = core_mask;
+    fw->core_mask = (1 << fw->ncores) - 1; // Ensure all the cores with lower ID have fw mapped
     fw->fw_bin = fw_bin;
     mutex_init(&fw->mutex);
     mutex_init(&fw->rpcmem_mutex);

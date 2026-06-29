@@ -138,9 +138,11 @@ struct mvx_dev_ctx {
     struct device_link *opp_dl;
     struct devfreq_dev_profile devfreq_profile;
     struct devfreq *devfreq;
+    bool devfreq_initialized;
     unsigned long target_freq;
     unsigned int target_cpufreq;
     struct list_head cpufreq_req_list;
+    struct completion probe_done;
 };
 
 /**
@@ -334,6 +336,9 @@ static int update_load(struct mvx_client_session *csession)
     if (disable_dfs)
         return 0;
 
+    if (IS_ERR_OR_NULL(ctx->devfreq) || !ctx->devfreq_initialized)
+        return 0;
+
     ret = update_freq(ctx);
     if (ret != 0)
         return ret;
@@ -485,6 +490,19 @@ static void print_debug(struct mvx_client_session *csession)
     struct mvx_dev_ctx *ctx = csession->ctx;
 
     mvx_sched_print_debug(&ctx->scheduler, &csession->session);
+}
+
+static int wait_probe_done(struct mvx_client_ops *client)
+{
+    struct mvx_dev_ctx *ctx = container_of(client, struct mvx_dev_ctx, client_ops);
+    unsigned long timeout;
+
+    timeout = wait_for_completion_timeout(&ctx->probe_done,
+                          msecs_to_jiffies(10000));
+    if (timeout == 0)
+        return -ETIMEDOUT;
+
+    return 0;
 }
 
 static struct mvx_dev_ctx *work_to_ctx(struct work_struct *work)
@@ -696,6 +714,8 @@ static int mvx_devfreq_init(struct mvx_dev_ctx *ctx)
         goto remove_device;
     }
 
+    ctx->devfreq_initialized = true;
+
     return ret;
 
 remove_device:
@@ -728,6 +748,7 @@ static int mvx_devfreq_remove(struct mvx_dev_ctx *ctx)
         devm_devfreq_unregister_opp_notifier(ctx->dev, ctx->devfreq);
         devm_kfree(ctx->dev, ctx->devfreq->data);
         devm_devfreq_remove_device(ctx->dev, ctx->devfreq);
+        ctx->devfreq_initialized = false;
         ctx->devfreq = NULL;
     }
     if (ctx->devfreq_profile.max_state > 0) {
@@ -786,6 +807,7 @@ static int mvx_dev_probe(struct device *dev,
 
     ctx->dev = dev;
     dev_set_drvdata(dev, ctx);
+    init_completion(&ctx->probe_done);
 
     /* Setup client ops callbacks. */
     ctx->client_ops.get_hw_ver = get_hw_ver;
@@ -802,6 +824,7 @@ static int mvx_dev_probe(struct device *dev,
     ctx->client_ops.update_load = update_load;
     ctx->client_ops.terminate = terminate;
     ctx->client_ops.reset_priority = reset_priority;
+    ctx->client_ops.wait_probe_done = wait_probe_done;
 
     /* Create if context. */
     ctx->if_ops = mvx_if_create(dev, &ctx->client_ops, ctx);
@@ -948,6 +971,8 @@ static int mvx_dev_probe(struct device *dev,
               mvx_hwreg_get_nlsid(&ctx->hwreg),
               dev->id);
 
+    complete_all(&ctx->probe_done);
+
     mvx_pm_runtime_put_sync(ctx->dev);
     return 0;
 
@@ -992,6 +1017,8 @@ destroy_if:
     mvx_if_destroy(ctx->if_ops);
 
 free_ctx:
+    complete_all(&ctx->probe_done);
+
     devm_kfree(dev, ctx);
     return ret;
 }

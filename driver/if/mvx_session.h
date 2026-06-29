@@ -458,6 +458,8 @@ struct mvx_session {
     uint32_t job_frames;
     uint32_t force_key_frame;
     bool pending_switch_out;
+    /* YUV2RGB CSC was programmed on the firmware session. */
+    bool yuv2rgb_configured;
     bool is_encoder;
     struct timespec64 *ts;
     struct timespec64 start;

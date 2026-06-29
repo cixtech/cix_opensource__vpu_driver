@@ -62,6 +62,11 @@
 #define MAX_RT_FPS_FRAMES (1 << 9)
 #define FPS_SKIP_FRAMES 200
 
+#define MVX_IS_SUPPORTED_YUV422_FORMAT(format) \
+    ((format) == MVX_FORMAT_YUV422_AFBC_8 || \
+     (format) == MVX_FORMAT_YUV422_YUY2 || \
+     (format) == MVX_FORMAT_YUV422_UYVY)
+
 /****************************************************************************
  * Private variables
  ****************************************************************************/
@@ -2317,6 +2322,87 @@ static int fw_encoder_setup(struct mvx_session *session)
     return ret;
 }
 
+static int fw_decoder_set_yuv2rgb_params(struct mvx_session *session)
+{
+    struct mvx_fw_set_option option;
+    int ret;
+
+    if (!mvx_is_rgb24(session->port[MVX_DIR_OUTPUT].format))
+        return 0;
+
+    option.code = MVX_FW_SET_DEC_YUV2RGB_PARAMS;
+
+    if (session->use_cust_color_conv_coef) {
+        memcpy(&option.yuv2rbg_csc_coef, &session->color_conv_coef,
+               sizeof(struct mvx_color_conv_coef));
+        ret = 0;
+    } else {
+        ret = generate_standards_yuv2rgb_coef(session->color_conv_mode,
+                              &option.yuv2rbg_csc_coef);
+    }
+
+    if (ret != 0)
+        return ret;
+
+    ret = fw_set_option(session, &option);
+    if (ret != 0) {
+        MVX_SESSION_WARN(session,
+                 "Failed to set yuv2rgb color conversion mode.");
+        return ret;
+    }
+
+    session->yuv2rgb_configured = true;
+
+    return 0;
+}
+
+/*
+ * Program YUV2RGB when userspace switches decoder output to RGB after the
+ * firmware was already configured for a YUV/AFBC output format.
+ *
+ * Called from mvx_session_set_format() while the capture port is stream-off.
+ * The firmware is left in STOPPED state; mvx_session_streamon() resumes it.
+ */
+static int fw_decoder_apply_yuv2rgb_on_format_change(struct mvx_session *session)
+{
+    int ret;
+
+    if (session->is_encoder || session->yuv2rgb_configured)
+        return 0;
+
+    if (!mvx_is_rgb24(session->port[MVX_DIR_OUTPUT].format))
+        return 0;
+
+    if (!is_fw_loaded(session))
+        return 0;
+
+    if (session->fw_state == MVX_FW_STATE_RUNNING) {
+        ret = fw_state_change(session, MVX_FW_STATE_STOPPED);
+        if (ret != 0)
+            return ret;
+
+        ret = wait_pending(session);
+        if (ret != 0)
+            return ret;
+    }
+
+    /*
+     * Output flush is only legal while stopped (or right after SEQ_PARAM).
+     * This clears the previous YUV/AFBC output configuration.
+     */
+    ret = fw_flush(session, MVX_DIR_OUTPUT);
+    if (ret != 0)
+        return ret;
+
+    ret = wait_pending(session);
+    if (ret != 0)
+        return ret;
+
+    session->port[MVX_DIR_OUTPUT].received_seq_param = false;
+
+    return fw_decoder_set_yuv2rgb_params(session);
+}
+
 static int fw_decoder_setup(struct mvx_session *session)
 {
     int ret;
@@ -2422,24 +2508,9 @@ static int fw_decoder_setup(struct mvx_session *session)
 
     if( mvx_is_rgb24(session->port[MVX_DIR_OUTPUT].format))
     {
-        option.code = MVX_FW_SET_DEC_YUV2RGB_PARAMS;
-
-        if(session->use_cust_color_conv_coef)
-        {
-            ret =0;
-            memcpy(&option.yuv2rbg_csc_coef,&session->color_conv_coef,sizeof(struct mvx_color_conv_coef));
-        }
-        else
-        {
-            ret =generate_standards_yuv2rgb_coef(session->color_conv_mode,&option.yuv2rbg_csc_coef);
-        }
-        if(0==ret)
-        ret = fw_set_option(session, &option);
-        if (ret != 0) {
-            MVX_SESSION_WARN(session,
-                     "Failed to set yuv2rgb color conversion mode.");
+        ret = fw_decoder_set_yuv2rgb_params(session);
+        if (ret != 0)
             return ret;
-        }
     }
     if (session->disabled_features != 0 || codec == MVX_FORMAT_AV1) {
         option.code = MVX_FW_SET_DISABLE_FEATURES;
@@ -3451,6 +3522,9 @@ static void reset_resolution(struct mvx_session *session,
         session->orig_width < 144 && session->orig_height < 144) {
         session->orig_width = *width;
         session->orig_height = *height;
+    } else if (dir == MVX_DIR_INPUT && session->is_encoder) {
+        session->orig_width = *width;
+        session->orig_height = *height;
     } else if (session->orig_width >= 144 && session->orig_height >= 144) {
         *width = session->orig_width;
         *height = session->orig_height;
@@ -3756,6 +3830,7 @@ int mvx_session_set_format(struct mvx_session *session,
 {
     struct mvx_session_port *port = &session->port[dir];
     int ret;
+    enum mvx_format old_format = port->format;
 
     if (session->error != 0)
         return session->error;
@@ -3841,6 +3916,13 @@ int mvx_session_set_format(struct mvx_session *session,
         session->nalu_format == MVX_NALU_FORMAT_UNDEFINED)
         mvx_session_set_nalu_format(session,
                     MVX_NALU_FORMAT_FOUR_BYTE_LENGTH_FIELD);
+
+    if (!session->is_encoder && dir == MVX_DIR_OUTPUT &&
+        mvx_is_rgb24(format) && !mvx_is_rgb24(old_format)) {
+        ret = fw_decoder_apply_yuv2rgb_on_format_change(session);
+        if (ret != 0)
+            return ret;
+    }
 
     return 0;
 }
@@ -4426,7 +4508,8 @@ static void mvx_handle_pong(struct mvx_session *session, struct mvx_fw_msg *msg)
     MVX_SESSION_INFO(session, "Firmware rsp: Pong.");
 }
 
-static void mvx_update_bitdepth(struct mvx_session *session, uint32_t bitdepth)
+static void mvx_update_format(struct mvx_session *session,
+                    uint32_t bitdepth, uint32_t coded_chroma_format)
 {
     struct mvx_session_port *p = &session->port[MVX_DIR_OUTPUT];
     struct mvx_session_format_map *map;
@@ -4442,6 +4525,20 @@ static void mvx_update_bitdepth(struct mvx_session *session, uint32_t bitdepth)
 
     p->old_format = p->format;
     p->old_pixelformat = p->pixelformat;
+
+    if (MVX_IS_SUPPORTED_YUV422_FORMAT(map->format)) {
+        if (coded_chroma_format < MVX_CHROMA_FORMAT_422) {
+            /* VPU cannot convert YUV420 or YUV400 to YUV422, so force to coded chroma format*/
+            if (map->format == MVX_FORMAT_YUV422_AFBC_8) {
+                p->format = MVX_FORMAT_YUV420_AFBC_8;
+                p->pixelformat = V4L2_PIX_FMT_YUV420_AFBC_8;
+            } else {
+                p->format = MVX_FORMAT_YUV420_NV12;
+                p->pixelformat = V4L2_PIX_FMT_NV12M;
+            }
+            map = mvx_session_find_format(p->pixelformat);
+        }
+    }
 
     if (bitdepth == map->bitdepth) {
         return;
@@ -4516,7 +4613,7 @@ static void mvx_handle_seq_param(struct mvx_session *session, struct mvx_fw_msg 
     p->in_port_changing |= msg->seq_param.bitdepth_luma != session->bitdepth_luma;
     p->in_port_changing |= msg->seq_param.bitdepth_chroma != session->bitdepth_chroma;
     p->in_port_changing |= msg->seq_param.chroma_format != session->coded_chroma_format;
-    mvx_update_bitdepth(session, msg->seq_param.bitdepth_chroma);
+    mvx_update_format(session, msg->seq_param.bitdepth_chroma, msg->seq_param.chroma_format);
     session->bitdepth_luma = msg->seq_param.bitdepth_luma;
     session->bitdepth_chroma = msg->seq_param.bitdepth_chroma;
     session->coded_chroma_format = msg->seq_param.chroma_format;
