@@ -1889,7 +1889,7 @@ int mvx_v4l2_vidioc_dqbuf(struct file *file,
     if (V4L2_TYPE_IS_MULTIPLANAR(vb->type) == false) {
         b->bytesused -= vb->planes[0].data_offset;
 
-        switch (vb->type) {
+        switch (vb->memory) {
         case V4L2_MEMORY_MMAP:
             b->m.offset += vb->planes[0].data_offset;
             break;
