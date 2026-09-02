@@ -1868,6 +1868,9 @@ int mvx_v4l2_vidioc_dqbuf(struct file *file,
 
     ret = vb2_dqbuf(&vport->vb2_queue, b, file->f_flags & O_NONBLOCK);
     if (ret != 0) {
+        if (ret == -EAGAIN && dir == MVX_DIR_OUTPUT)
+            mvx_session_report_stall(&vsession->session);
+
         MVX_SESSION_VERBOSE(&vsession->session, "v4l2: Dequeue buffer. vb2_dqbuf() failed, dir=%d, ret=%d",
                                 dir, ret);
         goto unlock_mutex;

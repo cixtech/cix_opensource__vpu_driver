@@ -340,11 +340,13 @@ struct mvx_session {
     wait_queue_head_t waitq;
     struct timer_list watchdog_timer;
     struct work_struct watchdog_work;
+    struct work_struct stall_work;
     struct work_struct flush_and_queue_work;
     unsigned int watchdog_count;
     bool switched_in;
     unsigned int setting_stride[MVX_BUFFER_NPLANES];//upstream setting stride
     unsigned int idle_count;
+    unsigned long last_fw_activity;
     long error;
     struct dentry *dentry;
 
@@ -1499,4 +1501,5 @@ int mvx_session_set_enc_disable_timescale(struct mvx_session *session, int val);
 void mvx_session_update_buffer_count(struct mvx_session *session,
                     enum mvx_direction dir);
 int mvx_session_switch_out(struct mvx_session *session);
+int mvx_session_report_stall(struct mvx_session *session);
 #endif /* _MVX_SESSION_H_ */

@@ -80,6 +80,9 @@ module_param(fw_watchdog_timeout, int, 0660);
 static int wait_pending_timeout = 3000; /* 3s should be enough in worst case - 32Kx32K decode */
 module_param(wait_pending_timeout, int, 0660);
 
+static int session_stall_timeout = 30000;
+module_param(session_stall_timeout, int, 0660);
+
 static bool enable_buffer_dump = 0;
 module_param(enable_buffer_dump, bool, 0660);
 
@@ -818,6 +821,8 @@ static int fw_send_msg(struct mvx_session *session,
 
     if (session->error != 0)
         return session->error;
+
+    session->last_fw_activity = jiffies;
 
     ret = session->fw.ops.put_message(&session->fw, msg);
     if (ret != 0) {
@@ -3432,6 +3437,59 @@ static void watchdog_work(struct work_struct *work)
     session->client_ops->soft_irq(session->csession);
 }
 
+static bool fw_silent(struct mvx_session *session)
+{
+    return session->port[MVX_DIR_OUTPUT].stream_on &&
+           session->error == 0 &&
+           session->last_fw_activity != 0 &&
+           time_after(jiffies, session->last_fw_activity +
+              msecs_to_jiffies(session_stall_timeout));
+}
+
+static void stall_work(struct work_struct *work)
+{
+    struct mvx_session *session =
+        container_of(work, struct mvx_session, stall_work);
+
+    mutex_lock(session->isession.mutex);
+
+    if (fw_silent(session)) {
+        int ret;
+
+        MVX_SESSION_WARN(session,
+                 "Session stalled. capture_buffers=%u, input_buffers=%u, idle_count=%u, switched_in=%u.",
+                 session->port[MVX_DIR_OUTPUT].buffer_count,
+                 session->port[MVX_DIR_INPUT].buffer_count,
+                 session->idle_count, session->switched_in);
+
+        ret = 0;
+        if (session->fw_state == MVX_FW_STATE_RUNNING) {
+            ret = fw_state_change(session, MVX_FW_STATE_STOPPED);
+            if (ret == 0)
+                ret = wait_pending(session);
+        }
+        if (ret == 0)
+            ret = fw_flush(session, MVX_DIR_OUTPUT);
+        if (ret == 0)
+            ret = wait_pending(session);
+        if (ret == 0)
+            ret = fw_state_change(session, MVX_FW_STATE_RUNNING);
+
+        if (ret != 0) {
+            MVX_SESSION_WARN(session,
+                     "Stall recovery failed, ret=%d.", ret);
+            send_event_error(session, -ETIME);
+        } else {
+            MVX_SESSION_WARN(session,
+                     "Stall recovered. capture_buffers=%u.",
+                     session->port[MVX_DIR_OUTPUT].buffer_count);
+            session->last_fw_activity = jiffies;
+        }
+    }
+
+    mutex_unlock(session->isession.mutex);
+}
+
 static void watchdog_timeout(struct timer_list *timer)
 {
     struct mvx_session *session =
@@ -3696,6 +3754,7 @@ int mvx_session_construct(struct mvx_session *session,
             (uintptr_t)&session->watchdog_timer);
 #endif
     INIT_WORK(&session->watchdog_work, watchdog_work);
+    INIT_WORK(&session->stall_work, stall_work);
     INIT_WORK(&session->flush_and_queue_work, flush_and_qbufs_work);
 
     if (mvx_log_perf.enabled & MVX_LOG_PERF_FPS) {
@@ -4735,6 +4794,9 @@ static void handle_fw_message(struct mvx_session *session,
 {
     uint32_t i;
     struct mvx_fw_msg_handler *handler = NULL;
+
+    if (msg->code != MVX_FW_CODE_IDLE)
+        session->last_fw_activity = jiffies;
 
     for (i = 0; i < ARRAY_SIZE(handlers); i++) {
         if (handlers[i].code == msg->code) {
@@ -6810,6 +6872,7 @@ void mvx_session_cancel_work(struct mvx_session *session)
 {
     cancel_work_sync(&session->flush_and_queue_work);
     cancel_work_sync(&session->watchdog_work);
+    cancel_work_sync(&session->stall_work);
     watchdog_stop(session);
 }
 
@@ -6906,6 +6969,14 @@ void mvx_session_update_buffer_count(struct mvx_session *session,
 int mvx_session_switch_out(struct mvx_session *session)
 {
     return fw_switch_out(session);
+}
+
+int mvx_session_report_stall(struct mvx_session *session)
+{
+    if (fw_silent(session))
+        queue_work(system_unbound_wq, &session->stall_work);
+
+    return 0;
 }
 
 int mvx_session_set_enc_lambda_scale(struct mvx_session *session,
