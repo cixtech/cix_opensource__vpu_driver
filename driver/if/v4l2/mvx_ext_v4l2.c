@@ -122,7 +122,7 @@ static int mvx_ext_if_register_device(struct mvx_ext_if *ext,
                 V4L2_CAP_VIDEO_M2M_MPLANE |
                 V4L2_CAP_EXT_PIX_FORMAT |
                 V4L2_CAP_STREAMING;
-    strncpy(ext->vdev.name, name, sizeof(ext->vdev.name));
+    strscpy(ext->vdev.name, name, sizeof(ext->vdev.name));
 
     video_set_drvdata(&ext->vdev, ext);
 
