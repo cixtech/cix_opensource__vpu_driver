@@ -1009,8 +1009,16 @@ static int mvx_dev_probe(struct device *dev,
             ctx->pmdomains[i] = pd;
         }
     }
-    pm_runtime_set_autosuspend_delay(ctx->pmdomains[0], 1000);
-    pm_runtime_use_autosuspend(ctx->pmdomains[0]);
+    /*
+     * ACPI Sky1 (O6N): pmdomains[0] is this device. Probe get+put plus a
+     * 1s autosuspend leaves runtime_status=suspending; STREAMON and
+     * power/control=on then block forever in rpm_resume. Keep the probe
+     * usage count and do not autosuspend. DT keeps the vendor path.
+     */
+    if (!has_acpi_companion(dev)) {
+        pm_runtime_set_autosuspend_delay(ctx->pmdomains[0], 1000);
+        pm_runtime_use_autosuspend(ctx->pmdomains[0]);
+    }
 
     pm_runtime_enable(dev);
     ret = pm_runtime_resume_and_get(dev);
@@ -1061,7 +1069,8 @@ static int mvx_dev_probe(struct device *dev,
 
     complete_all(&ctx->probe_done);
 
-    mvx_pm_runtime_put_sync(ctx->dev);
+    if (!has_acpi_companion(dev))
+        mvx_pm_runtime_put_sync(ctx->dev);
     return 0;
 
 devfreq_remove:
